@@ -208,6 +208,7 @@ class CosmosCommand implements SqlCommand {
 
     query += 'FROM c'
 
+    // Handle WHERE clause
     if (sql.toLowerCase().includes('where')) {
       const [_, afterWhere] = sql.split(/where/i)
       const seg = afterWhere.split(/order by|limit|offset/i)[0].trim()
@@ -223,6 +224,20 @@ class CosmosCommand implements SqlCommand {
       )
 
       query += ` WHERE ${replaced}`
+    }
+
+    // Handle ORDER BY clause
+    const orderByMatch = sql.match(
+      /ORDER BY\s+([^]*?)(?:\s+(?:LIMIT|OFFSET)|$)/i,
+    )
+    if (orderByMatch) {
+      const orderByClause = orderByMatch[1].trim()
+      const orderByFields = orderByClause.split(',').map((field) => {
+        const [fieldName, direction] = field.trim().split(/\s+/)
+        // Add 'c.' prefix to field name and keep the direction (ASC/DESC) if present
+        return `c.${fieldName.trim()}${direction ? ' ' + direction : ''}`
+      })
+      query += ` ORDER BY ${orderByFields.join(', ')}`
     }
 
     query = this.appendLimitOffset(sql, query)
