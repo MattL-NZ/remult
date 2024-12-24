@@ -63,7 +63,7 @@ export class CosmosDataProvider
   }
 
   async transaction(run: (dp: SqlImplementation) => Promise<void>) {
-    await run(this) // Cosmos doesn't support multi-statement SQL transactions, so just run.
+    await run(this)
   }
 
   async entityIsUsedForTheFirstTime(_entity: EntityMetadata) {
@@ -84,12 +84,19 @@ export class CosmosDataProvider
 
 class CosmosCommand implements SqlCommand {
   private params: any[] = []
+  private entityMetadata?: EntityMetadata
+
   constructor(private container: Container) {}
+
+  setEntityMetadata(metadata: EntityMetadata) {
+    this.entityMetadata = metadata
+  }
 
   addParameterAndReturnSqlToken(val: any) {
     this.params.push(val)
     return `@p${this.params.length}`
   }
+
   param(val: any) {
     return this.addParameterAndReturnSqlToken(val)
   }
@@ -112,7 +119,7 @@ class CosmosCommand implements SqlCommand {
       {} as any,
     )
     const { resource } = await this.container.items.create(doc)
-    return new CosmosQueryResult([resource])
+    return new CosmosQueryResult([resource], this.entityMetadata)
   }
 
   private async update(sql: string): Promise<SqlResult> {
@@ -127,7 +134,7 @@ class CosmosCommand implements SqlCommand {
 
     updates.forEach(({ field, value }) => (doc[field] = value))
     const { resource } = await this.container.items.upsert(doc)
-    return new CosmosQueryResult([resource])
+    return new CosmosQueryResult([resource], this.entityMetadata)
   }
 
   private async delete(sql: string): Promise<SqlResult> {
@@ -142,15 +149,15 @@ class CosmosCommand implements SqlCommand {
       })
       .fetchAll()
 
-    if (!resources.length) return new CosmosQueryResult([])
+    if (!resources.length) return new CosmosQueryResult([], this.entityMetadata)
     await this.container.item(resources[0].id).delete()
-    return new CosmosQueryResult(resources)
+    return new CosmosQueryResult(resources, this.entityMetadata)
   }
 
   private async select(sql: string): Promise<SqlResult> {
     const querySpec = this.buildSelectQuery(sql)
     const { resources } = await this.container.items.query(querySpec).fetchAll()
-    return new CosmosQueryResult(resources)
+    return new CosmosQueryResult(resources, this.entityMetadata)
   }
 
   private parseSetClause(setClause: string) {
@@ -162,7 +169,6 @@ class CosmosCommand implements SqlCommand {
   }
 
   private parseWhereClause(whereClause: string) {
-    // e.g., "id = @p1" => parse the integer from '@p1'
     const idx = parseInt(whereClause.split('@p')[1], 10) - 1
     return this.params[idx]
   }
@@ -178,11 +184,31 @@ class CosmosCommand implements SqlCommand {
   }
 
   private buildSelectQuery(sql: string) {
-    let query = 'SELECT * FROM c'
+    // Start with a base query
+    let query = 'SELECT '
     const parameters: { name: string; value: any }[] = []
 
+    // Extract the fields from the SQL query
+    const selectMatch = sql.match(/SELECT\s+([^]*?)\s+FROM/i)
+    if (selectMatch) {
+      const fields = selectMatch[1].trim()
+      if (fields === '*') {
+        query += '* '
+      } else {
+        // For specific fields, prefix them with 'c.'
+        const fieldList = fields
+          .split(',')
+          .map((f) => `c.${f.trim()}`)
+          .join(', ')
+        query += fieldList + ' '
+      }
+    } else {
+      query += '* '
+    }
+
+    query += 'FROM c'
+
     if (sql.toLowerCase().includes('where')) {
-      // everything after "WHERE", up to "ORDER BY", "LIMIT", or "OFFSET"
       const [_, afterWhere] = sql.split(/where/i)
       const seg = afterWhere.split(/order by|limit|offset/i)[0].trim()
 
@@ -213,13 +239,45 @@ class CosmosCommand implements SqlCommand {
 }
 
 class CosmosQueryResult implements SqlResult {
-  constructor(public rows: any[]) {
+  private selectedFields: string[]
+
+  constructor(
+    public rows: any[],
+    private entityMetadata?: EntityMetadata,
+    sql?: string,
+  ) {
+    // Extract selected fields from SQL query
+    this.selectedFields = []
+    if (sql) {
+      const match = sql.match(/SELECT\s+([^]*?)\s+FROM/i)
+      if (match) {
+        const fields = match[1].trim()
+        if (fields !== '*') {
+          this.selectedFields = fields.split(',').map((f) => f.trim())
+        }
+      }
+    }
+
+    // Remove Cosmos system properties but preserve all other fields
     this.rows = rows.map(
       ({ _rid, _self, _etag, _attachments, _ts, ...rest }) => rest,
     )
   }
-  getColumnKeyInResultForIndexInSelect(i: number) {
-    return this.rows.length ? Object.keys(this.rows[0])[i] || '' : ''
+
+  getColumnKeyInResultForIndexInSelect(i: number): string {
+    // If specific fields were selected, use those
+    if (this.selectedFields.length > 0) {
+      return this.selectedFields[i] || ''
+    }
+
+    // Otherwise use entity metadata if available
+    if (this.entityMetadata) {
+      const fields = this.entityMetadata.fields.toArray()
+      return fields[i]?.key || ''
+    }
+
+    // Fallback to object keys
+    return Object.keys(this.rows[0] || {})[i] || ''
   }
 }
 
