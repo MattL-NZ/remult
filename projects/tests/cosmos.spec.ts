@@ -1,8 +1,8 @@
 import { describe, it, beforeAll, afterAll, expect } from 'vitest'
-import { Entity, Fields, Remult, Repository, SqlDatabase } from '../core'
+import { Entity, Fields, Remult, Repository } from '../core'
 import { CosmosDataProvider } from '../core/remult-cosmos-db.js'
+import { GroupByCountMember } from '../core/src/remult3/remult3.js'
 
-// Add table entity information below for test mock
 @Entity('events-monitor-dev')
 class EventsMonitorDev {
   @Fields.uuid() id = ''
@@ -32,7 +32,7 @@ describe('Cosmos DB Data Provider', () => {
       console.log('Provider initialized successfully')
 
       remult = new Remult()
-      remult.dataProvider = new SqlDatabase(provider)
+      remult.dataProvider = provider
       repo = remult.repo(EventsMonitorDev)
     } catch (error) {
       console.error('Setup failed:', error)
@@ -41,8 +41,8 @@ describe('Cosmos DB Data Provider', () => {
   })
 
   afterAll(async () => {
-    if (provider) {
-      await provider.end()
+    if (provider.client) {
+      await provider.client.dispose()
       console.log('Provider connection closed')
     }
   })
@@ -59,14 +59,11 @@ describe('Cosmos DB Data Provider', () => {
     try {
       console.log('Starting data fetch test')
 
-      // Simple find with limit
       const results = await repo.find({
         limit: 5,
       })
 
       console.log(`Found ${results.length} records`)
-
-      // Basic validation
       expect(Array.isArray(results)).toBe(true)
 
       if (results.length > 0) {
@@ -74,7 +71,6 @@ describe('Cosmos DB Data Provider', () => {
         expect(firstRecord).toHaveProperty('id')
         expect(firstRecord).toHaveProperty('name')
         expect(firstRecord).toHaveProperty('eventType')
-
         console.log('Sample record:', firstRecord)
       }
     } catch (error) {
@@ -83,6 +79,7 @@ describe('Cosmos DB Data Provider', () => {
     }
   })
 
+  // Test insert operations
   it('should insert a new record', async () => {
     try {
       console.log('Starting insert test')
@@ -92,20 +89,15 @@ describe('Cosmos DB Data Provider', () => {
         eventType: 'test.event',
       }
 
-      console.log('Inserting test data:', testData)
-
       const newEvent = await repo.insert(testData)
       console.log('Inserted event:', newEvent)
 
-      // Validate the inserted data
       expect(newEvent.id).toBeDefined()
       expect(typeof newEvent.id).toBe('string')
       expect(newEvent.name).toBe('Test Event')
       expect(newEvent.eventType).toBe('test.event')
 
-      // Verify we can fetch the inserted record
       const found = await repo.findFirst({ id: newEvent.id })
-
       expect(found).toBeDefined()
       expect(found?.id).toBe(newEvent.id)
     } catch (error) {
@@ -114,28 +106,24 @@ describe('Cosmos DB Data Provider', () => {
     }
   })
 
-  // Update a record
+  // Test update operations
   it('should update an existing record', async () => {
     try {
       console.log('Starting update test')
 
-      // Find an existing record
       const existing = await repo.findFirst({ eventType: 'test.event' })
-
       console.log('Found existing record:', existing)
 
       if (existing) {
-        // Update the record
         existing.name = 'Updated Event'
         existing.eventType = 'test.event.updated'
         const updated = await repo.save(existing)
 
         console.log('Updated record:', updated)
-
-        // Verify the update
         expect(updated).toBeDefined()
         expect(updated.id).toBe(existing.id)
         expect(updated.name).toBe('Updated Event')
+        expect(updated.eventType).toBe('test.event.updated')
       } else {
         console.warn('No record found for update test')
       }
@@ -145,29 +133,63 @@ describe('Cosmos DB Data Provider', () => {
     }
   })
 
-  // Delete a record
+  // Test delete operations
   it('should delete an existing record', async () => {
     try {
       console.log('Starting delete test')
 
-      // Find an existing record
       const existing = await repo.findFirst({ eventType: 'test.event.updated' })
-
       console.log('Found existing record:', existing)
 
       if (existing) {
-        // Delete the record
         await repo.delete(existing)
-
-        // Verify the deletion
         const deleted = await repo.findFirst({ id: existing.id })
-
         expect(deleted).toBeUndefined()
       } else {
         console.warn('No record found for delete test')
       }
     } catch (error) {
       console.error('Delete test failed:', error)
+      throw error
+    }
+  })
+
+  // Test group by operations
+  it('should support group by operations', async () => {
+    try {
+      console.log('Starting group by test')
+
+      // Basic groupBy test
+      const results = await repo.groupBy({
+        group: ['eventType'], // Use string key instead of FieldMetadata
+      })
+
+      console.log('Group by results:', results)
+
+      expect(Array.isArray(results)).toBe(true)
+      if (results.length > 0) {
+        expect(results[0]).toHaveProperty('eventType')
+        expect(results[0]).toHaveProperty(GroupByCountMember)
+      }
+
+      // Test with a where clause
+      const resultsWithFilter = await repo.groupBy({
+        group: ['eventType'],
+        where: { eventType: 'test.event' },
+      })
+
+      expect(Array.isArray(resultsWithFilter)).toBe(true)
+
+      // Test with count
+      const resultsWithCount = await repo.groupBy({
+        group: ['eventType'],
+      })
+
+      if (resultsWithCount.length > 0) {
+        expect(resultsWithCount[0]).toHaveProperty(GroupByCountMember)
+      }
+    } catch (error) {
+      console.error('Group by test failed:', error)
       throw error
     }
   })
